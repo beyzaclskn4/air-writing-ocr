@@ -7,7 +7,8 @@ import time
 from collections import deque
 import math
 
-# ---------- CONFIG ----------
+
+,# ---------- CONFIG ----------
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 CAM_ID = 0
