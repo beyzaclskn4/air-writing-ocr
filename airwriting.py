@@ -18,6 +18,7 @@ DRAW_COLOR = (0, 0, 0)
 LINE_THICK = 30  # OCR için çok kalın çizgi (daha iyi tanıma)
 SMOOTHING = 0.1  # Çok hafif smoothing - işaret parmağının ucunu direkt takip et
 
+
 # İşaret parmağı kontrolü için eşikler
 INDEX_EXTENDED_THRESHOLD = 0.15  # İşaret parmağı dışarı çıkmış mı?
 FINGERS_CLOSED_THRESHOLD = 0.08  # Diğer parmaklar kapalı mı?
