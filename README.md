@@ -93,14 +93,14 @@ pip install opencv-python mediapipe pytesseract numpy
 3. Tesseract OCR kurulumu
 
 * Windows örnek: `C:\Program Files\Tesseract-OCR\tesseract.exe`
-* Bu yol `air_write_stable.py` içinde `pytesseract.pytesseract.tesseract_cmd` olarak ayarlanmalı.
+* Bu yol `airwriting.py` içinde `pytesseract.pytesseract.tesseract_cmd` olarak ayarlanmalı.
 
 ---
 
 ## 🎮 Kullanım
 
 ```bash
-python air_write_stable.py
+python airwriting.py
 ```
 
 * **Başlatma:** Sadece işaret parmağınızı açın.

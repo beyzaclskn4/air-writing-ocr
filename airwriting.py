@@ -1,4 +1,3 @@
-# air_write_stable.py
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -27,6 +26,70 @@ MIN_MOVE_DISTANCE = 3    # Minimum hareket mesafesi (piksel)
 MIN_POINTS_FOR_OCR = 15  # OCR için daha fazla nokta (daha iyi tanıma)
 OCR_COOLDOWN = 1.0
 MINI_SIZE = 200
+APPEND_MODE_TIMEOUT = 3.0  # Çoklu çizim için süre (tüm harfler için detay ekleme)
+
+# Harflere göre detay türleri (öneri mesajları için)
+# Hem büyük hem küçük harfler için
+LETTER_DETAIL_TYPES = {
+    # Üst nokta gerektirenler
+    'i': 'top_dot',
+    'j': 'top_dot',
+    'I': 'top_bottom_lines',  # Büyük I - üst ve alt çizgi
+    'J': 'bottom_dot',  # Büyük J - alt nokta
+    # Üst çizgi gerektirenler
+    'A': 'top_line',
+    'a': 'top_line',
+    'E': 'top_middle_bottom_lines',  # Üst, orta, alt çizgi
+    'e': 'top_middle_bottom_lines',
+    'F': 'top_middle_lines',  # Üst ve orta çizgi
+    'f': 'top_middle_lines',
+    'T': 'top_line',
+    't': 'top_line',
+    'G': 'top_line',  # Üstte küçük çizgi
+    'g': 'top_line',
+    # Üst yuvarlak gerektirenler
+    'B': 'top_bottom_round',  # Üst ve alt yuvarlak
+    'b': 'top_bottom_round',
+    'D': 'top_bottom_round',  # Üst ve alt yuvarlak
+    'd': 'top_bottom_round',
+    'P': 'top_round',
+    'p': 'top_round',
+    'R': 'top_round',
+    'r': 'top_round',
+    # Orta çizgi gerektirenler
+    'H': 'middle_line',
+    'h': 'middle_line',
+    # Alt detay gerektirenler
+    'Q': 'bottom_line',  # Alt çizgi
+    'q': 'bottom_line',
+    # Diğer harfler için genel detay
+    'C': 'general_detail',
+    'c': 'general_detail',
+    'K': 'general_detail',
+    'k': 'general_detail',
+    'L': 'general_detail',
+    'l': 'general_detail',
+    'M': 'general_detail',
+    'm': 'general_detail',
+    'N': 'general_detail',
+    'n': 'general_detail',
+    'O': 'general_detail',
+    'o': 'general_detail',
+    'S': 'general_detail',
+    's': 'general_detail',
+    'U': 'general_detail',
+    'u': 'general_detail',
+    'V': 'general_detail',
+    'v': 'general_detail',
+    'W': 'general_detail',
+    'w': 'general_detail',
+    'X': 'general_detail',
+    'x': 'general_detail',
+    'Y': 'general_detail',
+    'y': 'general_detail',
+    'Z': 'general_detail',
+    'z': 'general_detail',
+}
 
 # ---------- SETUP ----------
 mp_hands = mp.solutions.hands
@@ -42,6 +105,9 @@ canvas_h, canvas_w = 0, 0
 pts = deque(maxlen=1024)
 drawing_active = False
 prev_x, prev_y = None, None
+last_finished_time = 0  # Son çizim bitiş zamanı (append mode için)
+append_mode = False  # Çoklu çizim modu aktif mi (i, j için nokta ekleme)
+waiting_for_detail = False  # İlk çizim yapıldı, detay bekleniyor (OCR henüz yapılmadı)
 
 # ---------- FUNCTIONS ----------
 def lm_to_px(lm, w, h):
@@ -527,12 +593,27 @@ with mp_hands.Hands(min_detection_confidence=0.6, min_tracking_confidence=0.6, m
             # Başlatma koşulu: Sadece işaret parmağı dışarı çıkmış (işaret yapma pozisyonu)
             # OCR sonucu gösterilirken yeni çizim başlamasın
             if not drawing_active:
-                if is_index_pointing(hand) and time.time() >= show_pred_until:
+                current_time = time.time()
+                # Append mode zaman aşımı kontrolü
+                # OCR sonucuna göre belirlenen append_mode'u zamanlayıcı kontrolüyle birlikte kullan
+                if last_finished_time > 0:
+                    time_since_finished = current_time - last_finished_time
+                    # Eğer append mode aktifti ama zaman aşımına uğradıysa, append mode'u kapat ve canvas'ı temizle
+                    if append_mode and time_since_finished >= APPEND_MODE_TIMEOUT:
+                        append_mode = False
+                        canvas = np.ones((canvas_h, canvas_w, 3), dtype=np.uint8) * CANVAS_BG
+                        print("Append mode timeout - Canvas cleared.")
+                
+                if is_index_pointing(hand) and current_time >= show_pred_until:
                     drawing_active = True
                     pts.clear()
                     prev_x, prev_y = None, None
-                    predicted = ""  # Önceki tahmini temizle
-                    print("Drawing started - Index finger pointing.")
+                    if not append_mode:
+                        predicted = ""  # Önceki tahmini temizle (yeni harf başlıyor)
+                        canvas = np.ones((canvas_h, canvas_w, 3), dtype=np.uint8) * CANVAS_BG
+                        print("Drawing started (new letter)")
+                    else:
+                        print(f"Drawing started (append mode - adding dot/detail to previous letter)")
 
             # Durdurma koşulu: index + thumb birleşince
             if drawing_active:
@@ -542,26 +623,108 @@ with mp_hands.Hands(min_detection_confidence=0.6, min_tracking_confidence=0.6, m
                     
                     # Koordinat bazlı harf analizi (hassas algılama için)
                     shape_data = None
+                    pattern_letter = None
+                    pattern_score = 0.0
+                    
                     if len(pts) >= MIN_POINTS_FOR_OCR:
                         shape_data = analyze_letter_shape(list(pts))
                         if shape_data:
                             print(f"Letter shape: aspect_ratio={shape_data['aspect_ratio']:.2f}, "
                                   f"size={shape_data['width']:.0f}x{shape_data['height']:.0f}")
+                            
+                            # Pattern matching yap (detay gerektiren harf kontrolü için)
+                            pattern_letter, pattern_score = pattern_match_letter(shape_data)
                     
-                    # OCR preprocessing
-                    prep = preprocess_for_ocr(canvas)
-                    last_ocr_time = time.time()
-                    if prep is not None and len(pts) >= MIN_POINTS_FOR_OCR:
-                        # OCR + koordinat analizi birlikte (maksimum hassasiyet)
-                        pred = ocr_single_char(prep, shape_data)
-                        predicted = pred if pred else ""
-                        show_pred_until = time.time() + 1.5
-                        print("Final prediction:", predicted if predicted else "[none]")
-                    # temizle
-                    canvas = np.ones((canvas_h, canvas_w, 3), dtype=np.uint8) * CANVAS_BG
+                    # İlk çizim mi, append mode çizimi mi kontrol et
+                    is_first_drawing = not append_mode
+                    
+                    # İlk çizimde: Eğer pattern matching detay gerektiren harf bulursa, OCR yapma
+                    # Sadece append mode aç ve kullanıcıya detay eklemesi için süre tanı
+                    if is_first_drawing and pattern_letter:
+                        pattern_upper = pattern_letter.upper()
+                        detail_type_key = LETTER_DETAIL_TYPES.get(pattern_letter, LETTER_DETAIL_TYPES.get(pattern_upper, 'general_detail'))
+                        
+                        # Eğer harf detay gerektiriyorsa (general_detail değilse), OCR yapma
+                        if detail_type_key != 'general_detail' and pattern_score > 0.6:
+                            append_mode = True
+                            waiting_for_detail = True  # Detay bekleniyor, OCR henüz yapılmadı
+                            predicted = pattern_letter  # Pattern matching sonucunu kullan (geçici tahmin)
+                            show_pred_until = time.time() + 0.5  # Kısa süre göster
+                            print(f"Pattern match: '{pattern_letter}' (estimated) - Please add detail. OCR will run after detail is added.")
+                            # OCR yapmayı atla, sadece pattern matching sonucunu göster
+                        else:
+                            # Detay gerektirmeyen harf veya düşük skor - normal OCR yap
+                            prep = preprocess_for_ocr(canvas)
+                            last_ocr_time = time.time()
+                            if prep is not None and len(pts) >= MIN_POINTS_FOR_OCR:
+                                pred = ocr_single_char(prep, shape_data)
+                                predicted = pred if pred else ""
+                                show_pred_until = time.time() + 1.5
+                                print("Final prediction:", predicted if predicted else "[none]")
+                                
+                                if predicted:
+                                    append_mode = True
+                                else:
+                                    append_mode = False
+                            else:
+                                append_mode = False
+                                predicted = ""
+                    else:
+                        # Append mode'da ikinci çizim - Şimdi OCR yap (detay eklendikten sonra)
+                        prep = preprocess_for_ocr(canvas)
+                        last_ocr_time = time.time()
+                        if prep is not None and len(pts) >= MIN_POINTS_FOR_OCR:
+                            # Detay eklendikten sonra OCR yap
+                            pred = ocr_single_char(prep, shape_data)
+                            predicted = pred if pred else ""
+                            show_pred_until = time.time() + 1.5
+                            waiting_for_detail = False  # Artık OCR yapıldı
+                            print("Final prediction (after detail):", predicted if predicted else "[none]")
+                            
+                            if predicted:
+                                append_mode = False  # Artık detay eklendi, append mode kapat
+                            else:
+                                append_mode = False
+                        else:
+                            append_mode = False
+                            waiting_for_detail = False
+                            predicted = ""
+                    
+                    # Canvas'ı temizleme - append mode için bekle
+                    # Sadece append mode aktif değilse veya zaman aşımı varsa temizle
+                    last_finished_time = time.time()
                     pts.clear()
                     prev_x, prev_y = None, None
-                    print("Drawing stopped - Index and thumb together.")
+                    
+                    if append_mode:
+                        letter_type = predicted if predicted else "?"
+                        # Hem orijinal hem büyük harf için kontrol et
+                        detail_type_key = LETTER_DETAIL_TYPES.get(letter_type, LETTER_DETAIL_TYPES.get(letter_type.upper() if letter_type else '?', 'general_detail'))
+                        
+                        # Detay türüne göre Türkçe mesaj
+                        detail_messages = {
+                            'top_dot': 'üst nokta (top dot)',
+                            'top_line': 'üst çizgi (top line)',
+                            'top_middle_lines': 'üst ve orta çizgi (top & middle lines)',
+                            'top_middle_bottom_lines': 'üst, orta ve alt çizgi (top, middle & bottom lines)',
+                            'top_bottom_lines': 'üst ve alt çizgi (top & bottom lines)',
+                            'top_round': 'üst yuvarlak (top round)',
+                            'top_bottom_round': 'üst ve alt yuvarlak (top & bottom rounds)',
+                            'middle_line': 'orta çizgi (middle line)',
+                            'bottom_line': 'alt çizgi (bottom line)',
+                            'bottom_dot': 'alt nokta (bottom dot)',
+                            'general_detail': 'detay (detail)'
+                        }
+                        detail_type = detail_messages.get(detail_type_key, 'detay (detail)')
+                        
+                        letter_display = letter_type.upper() if letter_type else "?"
+                        print(f"Drawing stopped - Append mode active. Canvas kept for additional drawing.")
+                        print(f"Letter '{letter_display}' detected - You can add {detail_type} if needed.")
+                        print(f"Draw again within {APPEND_MODE_TIMEOUT} seconds to add detail, or wait {APPEND_MODE_TIMEOUT} seconds for new letter.")
+                    else:
+                        # Append mode değilse canvas'ı temizle (normal harf)
+                        canvas = np.ones((canvas_h, canvas_w, 3), dtype=np.uint8) * CANVAS_BG
+                        print("Drawing stopped - Index and thumb together.")
 
             # Çizim aktifse - İşaret parmağının ucundan direkt çiz
             if drawing_active:
@@ -632,18 +795,57 @@ with mp_hands.Hands(min_detection_confidence=0.6, min_tracking_confidence=0.6, m
         combined[0:MINI_SIZE,0:MINI_SIZE]=mini
 
         # Metin
-        cv2.putText(combined,"Start: Index finger only | Stop: Index+Thumb together | c=clear s=save q=quit",
+        help_text = "Start: Index finger only | Stop: Index+Thumb together | All letters: Add detail after letter | c=clear s=save q=quit"
+        cv2.putText(combined, help_text,
                     (10,h-10),cv2.FONT_HERSHEY_SIMPLEX,0.4,(50,50,50),1,cv2.LINE_AA)
         
         # Çizim durumu göstergesi
         if drawing_active:
-            cv2.putText(combined, "DRAWING...", (w-150, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+            if append_mode:
+                cv2.putText(combined, "APPEND MODE...", (w-200, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2, cv2.LINE_AA)
+            else:
+                cv2.putText(combined, "DRAWING...", (w-150, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+        
+        # Append mode zamanlayıcı gösterimi
+        if last_finished_time > 0 and not drawing_active and append_mode:
+            time_since_finished = time.time() - last_finished_time
+            if time_since_finished < APPEND_MODE_TIMEOUT:
+                remaining_time = APPEND_MODE_TIMEOUT - time_since_finished
+                letter_type = predicted if predicted else "?"
+                # Hem orijinal hem büyük harf için kontrol et
+                detail_type_key = LETTER_DETAIL_TYPES.get(letter_type, LETTER_DETAIL_TYPES.get(letter_type.upper() if letter_type else '?', 'general_detail'))
+                
+                # Detay türüne göre kısa mesaj
+                detail_texts = {
+                    'top_dot': 'Add top dot?',
+                    'top_line': 'Add top line?',
+                    'top_middle_lines': 'Add lines?',
+                    'top_middle_bottom_lines': 'Add lines?',
+                    'top_bottom_lines': 'Add lines?',
+                    'top_round': 'Add top round?',
+                    'top_bottom_round': 'Add rounds?',
+                    'middle_line': 'Add middle line?',
+                    'bottom_line': 'Add bottom line?',
+                    'bottom_dot': 'Add bottom dot?',
+                    'general_detail': 'Add detail?'
+                }
+                detail_text = detail_texts.get(detail_type_key, 'Add detail?')
+                
+                cv2.putText(combined, f"{detail_text} ({remaining_time:.1f}s)", (w-250, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 2, cv2.LINE_AA)
 
-        # OCR sonucu
+        # OCR sonucu veya tahmin
         if predicted and time.time() < show_pred_until:
-            cv2.putText(combined,predicted.upper(),(w//2-50,h//2),
-                        cv2.FONT_HERSHEY_SIMPLEX,4.0,(0,128,0),8,cv2.LINE_AA)
+            if waiting_for_detail:
+                # İlk çizim - sadece tahmin (detay henüz eklenmedi)
+                cv2.putText(combined, f"{predicted.upper()}?", (w//2-50, h//2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 4.0, (255, 165, 0), 8, cv2.LINE_AA)
+            else:
+                # Final OCR sonucu (detay eklendikten sonra)
+                cv2.putText(combined, predicted.upper(), (w//2-50, h//2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 4.0, (0, 128, 0), 8, cv2.LINE_AA)
 
         cv2.imshow("Air Writing Stable",combined)
 
@@ -654,6 +856,10 @@ with mp_hands.Hands(min_detection_confidence=0.6, min_tracking_confidence=0.6, m
             canvas=np.ones((canvas_h, canvas_w, 3), dtype=np.uint8)*CANVAS_BG
             pts.clear()
             prev_x,prev_y=None,None
+            last_finished_time=0
+            append_mode=False
+            waiting_for_detail=False
+            predicted=""
             print("Canvas cleared.")
         elif key==ord('s'):
             fname=f"airwrite_{int(time.time())}.png"
